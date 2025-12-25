@@ -1,0 +1,217 @@
+import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+
+def rk4_step(f, y, t, dt):
+    k1 = f(t, y)
+    k2 = f(t + 0.5 * dt, y + 0.5 * dt * k1)
+    k3 = f(t + 0.5 * dt, y + 0.5 * dt * k2)
+    k4 = f(t + dt, y + dt * k3)
+    return y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+class NPendulum:
+    def __init__(self, N, lengths=None, masses=None, g=9.81, damping=0.0):
+        self.N = int(N)
+        self.g = float(g)
+        self.damping = float(damping)
+
+        if lengths is None:
+            lengths = np.ones(self.N, dtype=float)
+        if masses is None:
+            masses = np.ones(self.N, dtype=float)
+
+        self.L = np.asarray(lengths, dtype=float).reshape(-1)
+        self.m = np.asarray(masses, dtype=float).reshape(-1)
+
+        if self.L.size != self.N or self.m.size != self.N:
+            raise ValueError("lengths and masses must each have length N")
+
+        self.m_suffix = np.array([self.m[i:].sum() for i in range(self.N)], dtype=float)
+
+    def mass_matrix(self, th):
+        N = self.N
+        M = np.zeros((N, N), dtype=float)
+        for a in range(N):
+            La = self.L[a]
+            for b in range(N):
+                Lb = self.L[b]
+                s = self.m_suffix[max(a, b)]
+                M[a, b] = s * La * Lb * np.cos(th[a] - th[b])
+        return M
+
+    def gravity_vec(self, th):
+        return self.g * self.L * self.m_suffix * np.sin(th)
+
+    def dM(self, th, a, b, l):
+        if l != a and l != b:
+            return 0.0
+        s = self.m_suffix[max(a, b)]
+        val = s * self.L[a] * self.L[b] * np.sin(th[a] - th[b])
+        if l == a:
+            return -val
+        return +val
+
+    def coriolis_vec(self, th, w):
+        N = self.N
+        C = np.zeros(N, dtype=float)
+        for j in range(N):
+            cj = 0.0
+            for k in range(N):
+                wk = w[k]
+                for l in range(N):
+                    term = 0.5 * (
+                        self.dM(th, j, k, l) +
+                        self.dM(th, j, l, k) -
+                        self.dM(th, k, l, j)
+                    )
+                    cj += term * wk * w[l]
+            C[j] = cj
+        return C
+    def deriv(self, t, y):
+        N = self.N
+        th = y[:N]
+        w = y[N:]
+
+        M = self.mass_matrix(th)
+        C = self.coriolis_vec(th, w)
+        G = self.gravity_vec(th)
+        D = self.damping * w
+
+        rhs = -(C + G + D)
+        a = np.linalg.solve(M, rhs)
+
+        dy = np.empty_like(y)
+        dy[:N] = w
+        dy[N:] = a
+        return dy
+
+    def positions(self, th):
+        x = np.zeros(self.N + 1, dtype=float)
+        y = np.zeros(self.N + 1, dtype=float)
+        for i in range(1, self.N + 1):
+            k = i - 1
+            x[i] = x[i - 1] + self.L[k] * np.sin(th[k])
+            y[i] = y[i - 1] - self.L[k] * np.cos(th[k])
+        return x, y
+
+def parse_list(s, N, name):
+    if s is None:
+        return None
+    parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+    if len(parts) == 1:
+        v = float(parts[0])
+        return np.full(N, v, dtype=float)
+    if len(parts) != N:
+        raise ValueError(f"{name} must be a single value or {N} comma-separated values")
+    return np.array([float(p) for p in parts], dtype=float)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--N", type=int, default=None)
+    ap.add_argument("--dt", type=float, default=0.003)
+    ap.add_argument("--steps-per-frame", type=int, default=5)
+    ap.add_argument("--fps", type=float, default=60.0)
+    ap.add_argument("--g", type=float, default=9.81)
+    ap.add_argument("--damping", type=float, default=0.02)
+    ap.add_argument("--lengths", type=str, default=None)
+    ap.add_argument("--masses", type=str, default=None)
+    ap.add_argument("--theta0-deg", type=str, default=None)
+    ap.add_argument("--omega0", type=str, default=None)
+    ap.add_argument("--random-init", action="store_true")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    if args.N is None:
+        try:
+            args.N = int(input("Choose N (e.g. 2 for double pendulum): ").strip())
+        except Exception:
+            raise SystemExit("Invalid N")
+
+    N = int(args.N)
+    if N < 1:
+        raise SystemExit("N must be >= 1")
+
+    lengths = parse_list(args.lengths, N, "lengths")
+    masses = parse_list(args.masses, N, "masses")
+    sim = NPendulum(N, lengths=lengths, masses=masses, g=args.g, damping=args.damping)
+
+    rng = np.random.default_rng(args.seed)
+
+    th0 = parse_list(args.theta0_deg, N, "theta0-deg")
+    w0 = parse_list(args.omega0, N, "omega0")
+
+    if th0 is None:
+        if args.random_init:
+            th0 = rng.uniform(low=-0.9, high=0.9, size=N) * np.pi
+        else:
+            th0 = (0.35 + 0.15 * np.arange(N) / max(1, N - 1)) * np.pi
+    else:
+        th0 = np.deg2rad(th0)
+
+    if w0 is None:
+        if args.random_init:
+            w0 = rng.normal(0.0, 0.15, size=N)
+        else:
+            w0 = np.zeros(N, dtype=float)
+
+    y = np.concatenate([th0, w0]).astype(float)
+    t = 0.0
+
+    total_L = float(np.sum(sim.L))
+    lim = 1.08 * total_L
+
+    fig = plt.figure(figsize=(8.2, 8.2))
+    ax = fig.add_subplot(111)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_title(f"{N}-Pendulum")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.grid(True, alpha=0.25)
+
+    line, = ax.plot([], [], lw=2)
+    masses_scatter = ax.scatter([], [], s=35)
+
+    x, yy = sim.positions(y[:N])
+    trail_len = 500
+    trail = np.zeros((trail_len, 2), dtype=float)
+    trail_i = 0
+    trail_line, = ax.plot([], [], lw=1, alpha=0.6)
+
+    def init():
+        line.set_data([], [])
+        masses_scatter.set_offsets(np.zeros((0, 2)))
+        trail_line.set_data([], [])
+        return line, masses_scatter, trail_line
+
+    def step_physics():
+        nonlocal y, t
+        for _ in range(int(args.steps_per_frame)):
+            y = rk4_step(sim.deriv, y, t, args.dt)
+            t += args.dt
+
+    def update(_frame):
+        nonlocal trail_i
+        step_physics()
+        th = y[:N]
+        x, yy = sim.positions(th)
+        line.set_data(x, yy)
+        masses_scatter.set_offsets(np.c_[x[1:], yy[1:]])
+        tip = np.array([x[-1], yy[-1]])
+        trail[trail_i % trail_len] = tip
+        trail_i += 1
+        k = min(trail_i, trail_len)
+        idx = (np.arange(k) + max(0, trail_i - k)) % trail_len
+        tr = trail[idx]
+        trail_line.set_data(tr[:, 0], tr[:, 1])
+
+        return line, masses_scatter, trail_line
+
+    interval_ms = 1000.0 / float(args.fps)
+    ani = FuncAnimation(fig, update, init_func=init, interval=interval_ms, blit=True)
+    plt.show()
+
+if __name__ == "__main__":
+    main()
