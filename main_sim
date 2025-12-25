@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+
 def rk4_step(f, y, t, dt):
     k1 = f(t, y)
     k2 = f(t + 0.5 * dt, y + 0.5 * dt * k1)
@@ -10,15 +11,9 @@ def rk4_step(f, y, t, dt):
     k4 = f(t + dt, y + dt * k3)
     return y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
-class NPendulum:
-    """
-    Planar N-pendulum with point masses at the joints (one mass per link end),
-    generalized coordinates theta_i measured from vertical (down is theta=0),
-    with rod lengths L_i.
 
-    Equations (no drive):
-        M(theta) * theta_ddot + C(theta, theta_dot) + G(theta) + D(theta_dot) = 0
-    """
+class NPendulum:
+
     def __init__(self, N, lengths=None, masses=None, g=9.81, damping=0.0):
         self.N = int(N)
         self.g = float(g)
@@ -35,12 +30,11 @@ class NPendulum:
         if self.L.size != self.N or self.m.size != self.N:
             raise ValueError("lengths and masses must each have length N")
 
-        # suffix mass sums: m_suffix[i] = sum_{k=i..N-1} m_k
+
         self.m_suffix = np.array([self.m[i:].sum() for i in range(self.N)], dtype=float)
 
-        # index map for s_{ab} = m_suffix[max(a,b)]
         idx = np.maximum.outer(np.arange(self.N), np.arange(self.N))
-        self._suffix_map = idx  # used to index into m_suffix
+        self._suffix_map = idx  
 
     def _mass_matrix_and_dM(self, th):
         """
@@ -50,24 +44,18 @@ class NPendulum:
         """
         N = self.N
         L = self.L
-        s = self.m_suffix[self._suffix_map]  # (N,N), s[a,b]=m_suffix[max(a,b)]
-
-        delta = th[:, None] - th[None, :]    # (N,N) with delta[a,b]=th[a]-th[b]
+        s = self.m_suffix[self._suffix_map] 
+        delta = th[:, None] - th[None, :]    
         cosd = np.cos(delta)
         sind = np.sin(delta)
-
         LL = L[:, None] * L[None, :]
         M = s * LL * cosd
-
-        # Build dM efficiently: only nonzero when l==a or l==b.
         dM = np.zeros((N, N, N), dtype=float)
 
-        # l == a : ∂/∂th_a cos(th_a-th_b) = -sin(th_a-th_b)
         for l in range(N):
             dM[l, l, :] = -s[l, :] * (L[l] * L) * sind[l, :]
 
-        # l == b : ∂/∂th_b cos(th_a-th_b) = +sin(th_a-th_b)
-        # Add into dM[l, :, l]
+     
         for l in range(N):
             dM[l, :, l] += s[:, l] * (L * L[l]) * sind[:, l]
 
@@ -75,11 +63,11 @@ class NPendulum:
 
     def mass_matrix(self, th):
         M, _ = self._mass_matrix_and_dM(th)
-        # (optional) enforce symmetry against tiny FP drift
+  
         return 0.5 * (M + M.T)
 
     def gravity_vec(self, th):
-        # G_j = ∂V/∂θ_j = g * m_suffix[j] * L_j * sin(θ_j)
+       
         return self.g * self.L * self.m_suffix * np.sin(th)
 
     def coriolis_vec(self, th, w):
@@ -89,13 +77,10 @@ class NPendulum:
         """
         M, dM = self._mass_matrix_and_dM(th)
 
-        # term1_j = Σ_{k,l} (∂M_{jk}/∂θ_l) w_k w_l = Σ_{k,l} dM[l,j,k] w_k w_l
+    
         term1 = np.einsum("ljk,k,l->j", dM, w, w)
-
-        # term2_j = Σ_{k,l} (∂M_{jl}/∂θ_k) w_k w_l = Σ_{k,l} dM[k,j,l] w_k w_l
+       
         term2 = np.einsum("kjl,k,l->j", dM.transpose(2, 1, 0), w, w)
-
-        # term3_j = Σ_{k,l} (∂M_{kl}/∂θ_j) w_k w_l = Σ_{k,l} dM[j,k,l] w_k w_l
         term3 = np.einsum("jkl,k,l->j", dM, w, w)
 
         C = 0.5 * (term1 + term2 - term3)
@@ -105,15 +90,12 @@ class NPendulum:
         N = self.N
         th = y[:N]
         w = y[N:]
-
         M = self.mass_matrix(th)
         C = self.coriolis_vec(th, w)
         G = self.gravity_vec(th)
         D = self.damping * w
-
         rhs = -(C + G + D)
         a = np.linalg.solve(M, rhs)
-
         dy = np.empty_like(y)
         dy[:N] = w
         dy[N:] = a
