@@ -11,6 +11,14 @@ def rk4_step(f, y, t, dt):
     return y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 class NPendulum:
+    """
+    Planar N-pendulum with point masses at the joints (one mass per link end),
+    generalized coordinates theta_i measured from vertical (down is theta=0),
+    with rod lengths L_i.
+
+    Equations (no drive):
+        M(theta) * theta_ddot + C(theta, theta_dot) + G(theta) + D(theta_dot) = 0
+    """
     def __init__(self, N, lengths=None, masses=None, g=9.81, damping=0.0):
         self.N = int(N)
         self.g = float(g)
@@ -27,47 +35,72 @@ class NPendulum:
         if self.L.size != self.N or self.m.size != self.N:
             raise ValueError("lengths and masses must each have length N")
 
+        # suffix mass sums: m_suffix[i] = sum_{k=i..N-1} m_k
         self.m_suffix = np.array([self.m[i:].sum() for i in range(self.N)], dtype=float)
 
-    def mass_matrix(self, th):
+        # index map for s_{ab} = m_suffix[max(a,b)]
+        idx = np.maximum.outer(np.arange(self.N), np.arange(self.N))
+        self._suffix_map = idx  # used to index into m_suffix
+
+    def _mass_matrix_and_dM(self, th):
+        """
+        Returns:
+          M: (N,N)
+          dM: (N,N,N) where dM[l,a,b] = ∂M[a,b]/∂theta_l
+        """
         N = self.N
-        M = np.zeros((N, N), dtype=float)
-        for a in range(N):
-            La = self.L[a]
-            for b in range(N):
-                Lb = self.L[b]
-                s = self.m_suffix[max(a, b)]
-                M[a, b] = s * La * Lb * np.cos(th[a] - th[b])
-        return M
+        L = self.L
+        s = self.m_suffix[self._suffix_map]  # (N,N), s[a,b]=m_suffix[max(a,b)]
+
+        delta = th[:, None] - th[None, :]    # (N,N) with delta[a,b]=th[a]-th[b]
+        cosd = np.cos(delta)
+        sind = np.sin(delta)
+
+        LL = L[:, None] * L[None, :]
+        M = s * LL * cosd
+
+        # Build dM efficiently: only nonzero when l==a or l==b.
+        dM = np.zeros((N, N, N), dtype=float)
+
+        # l == a : ∂/∂th_a cos(th_a-th_b) = -sin(th_a-th_b)
+        for l in range(N):
+            dM[l, l, :] = -s[l, :] * (L[l] * L) * sind[l, :]
+
+        # l == b : ∂/∂th_b cos(th_a-th_b) = +sin(th_a-th_b)
+        # Add into dM[l, :, l]
+        for l in range(N):
+            dM[l, :, l] += s[:, l] * (L * L[l]) * sind[:, l]
+
+        return M, dM
+
+    def mass_matrix(self, th):
+        M, _ = self._mass_matrix_and_dM(th)
+        # (optional) enforce symmetry against tiny FP drift
+        return 0.5 * (M + M.T)
 
     def gravity_vec(self, th):
+        # G_j = ∂V/∂θ_j = g * m_suffix[j] * L_j * sin(θ_j)
         return self.g * self.L * self.m_suffix * np.sin(th)
 
-    def dM(self, th, a, b, l):
-        if l != a and l != b:
-            return 0.0
-        s = self.m_suffix[max(a, b)]
-        val = s * self.L[a] * self.L[b] * np.sin(th[a] - th[b])
-        if l == a:
-            return -val
-        return +val
-
     def coriolis_vec(self, th, w):
-        N = self.N
-        C = np.zeros(N, dtype=float)
-        for j in range(N):
-            cj = 0.0
-            for k in range(N):
-                wk = w[k]
-                for l in range(N):
-                    term = 0.5 * (
-                        self.dM(th, j, k, l) +
-                        self.dM(th, j, l, k) -
-                        self.dM(th, k, l, j)
-                    )
-                    cj += term * wk * w[l]
-            C[j] = cj
+        """
+        C_j = Σ_{k,l} Γ_{jkl} w_k w_l,
+        Γ_{jkl} = 1/2(∂M_{jk}/∂θ_l + ∂M_{jl}/∂θ_k - ∂M_{kl}/∂θ_j)
+        """
+        M, dM = self._mass_matrix_and_dM(th)
+
+        # term1_j = Σ_{k,l} (∂M_{jk}/∂θ_l) w_k w_l = Σ_{k,l} dM[l,j,k] w_k w_l
+        term1 = np.einsum("ljk,k,l->j", dM, w, w)
+
+        # term2_j = Σ_{k,l} (∂M_{jl}/∂θ_k) w_k w_l = Σ_{k,l} dM[k,j,l] w_k w_l
+        term2 = np.einsum("kjl,k,l->j", dM.transpose(2, 1, 0), w, w)
+
+        # term3_j = Σ_{k,l} (∂M_{kl}/∂θ_j) w_k w_l = Σ_{k,l} dM[j,k,l] w_k w_l
+        term3 = np.einsum("jkl,k,l->j", dM, w, w)
+
+        C = 0.5 * (term1 + term2 - term3)
         return C
+
     def deriv(self, t, y):
         N = self.N
         th = y[:N]
@@ -95,6 +128,7 @@ class NPendulum:
             y[i] = y[i - 1] - self.L[k] * np.cos(th[k])
         return x, y
 
+
 def parse_list(s, N, name):
     if s is None:
         return None
@@ -105,6 +139,7 @@ def parse_list(s, N, name):
     if len(parts) != N:
         raise ValueError(f"{name} must be a single value or {N} comma-separated values")
     return np.array([float(p) for p in parts], dtype=float)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -155,7 +190,7 @@ def main():
         else:
             w0 = np.zeros(N, dtype=float)
 
-    y = np.concatenate([th0, w0]).astype(float)
+    state = np.concatenate([th0, w0]).astype(float)
     t = 0.0
 
     total_L = float(np.sum(sim.L))
@@ -174,7 +209,6 @@ def main():
     line, = ax.plot([], [], lw=2)
     masses_scatter = ax.scatter([], [], s=35)
 
-    x, yy = sim.positions(y[:N])
     trail_len = 500
     trail = np.zeros((trail_len, 2), dtype=float)
     trail_i = 0
@@ -187,18 +221,21 @@ def main():
         return line, masses_scatter, trail_line
 
     def step_physics():
-        nonlocal y, t
+        nonlocal state, t
         for _ in range(int(args.steps_per_frame)):
-            y = rk4_step(sim.deriv, y, t, args.dt)
+            state = rk4_step(sim.deriv, state, t, args.dt)
             t += args.dt
 
     def update(_frame):
         nonlocal trail_i
         step_physics()
-        th = y[:N]
+
+        th = state[:N]
         x, yy = sim.positions(th)
+
         line.set_data(x, yy)
         masses_scatter.set_offsets(np.c_[x[1:], yy[1:]])
+
         tip = np.array([x[-1], yy[-1]])
         trail[trail_i % trail_len] = tip
         trail_i += 1
@@ -210,8 +247,9 @@ def main():
         return line, masses_scatter, trail_line
 
     interval_ms = 1000.0 / float(args.fps)
-    ani = FuncAnimation(fig, update, init_func=init, interval=interval_ms, blit=True)
+    _ani = FuncAnimation(fig, update, init_func=init, interval=interval_ms, blit=True)
     plt.show()
+
 
 if __name__ == "__main__":
     main()
