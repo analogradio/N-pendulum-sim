@@ -18,21 +18,15 @@ class NPendulum:
         self.N = int(N)
         self.g = float(g)
         self.damping = float(damping)
-
         if lengths is None:
             lengths = np.ones(self.N, dtype=float)
         if masses is None:
             masses = np.ones(self.N, dtype=float)
-
         self.L = np.asarray(lengths, dtype=float).reshape(-1)
         self.m = np.asarray(masses, dtype=float).reshape(-1)
-
         if self.L.size != self.N or self.m.size != self.N:
             raise ValueError("lengths and masses must each have length N")
-
-
         self.m_suffix = np.array([self.m[i:].sum() for i in range(self.N)], dtype=float)
-
         idx = np.maximum.outer(np.arange(self.N), np.arange(self.N))
         self._suffix_map = idx  
 
@@ -55,7 +49,6 @@ class NPendulum:
         for l in range(N):
             dM[l, l, :] = -s[l, :] * (L[l] * L) * sind[l, :]
 
-     
         for l in range(N):
             dM[l, :, l] += s[:, l] * (L * L[l]) * sind[:, l]
 
@@ -76,13 +69,9 @@ class NPendulum:
         Γ_{jkl} = 1/2(∂M_{jk}/∂θ_l + ∂M_{jl}/∂θ_k - ∂M_{kl}/∂θ_j)
         """
         M, dM = self._mass_matrix_and_dM(th)
-
-    
         term1 = np.einsum("ljk,k,l->j", dM, w, w)
-       
         term2 = np.einsum("kjl,k,l->j", dM.transpose(2, 1, 0), w, w)
         term3 = np.einsum("jkl,k,l->j", dM, w, w)
-
         C = 0.5 * (term1 + term2 - term3)
         return C
 
